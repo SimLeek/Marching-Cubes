@@ -1,6 +1,8 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 [ExecuteInEditMode]
 public class MeshGenerator : MonoBehaviour {
@@ -52,11 +54,18 @@ public class MeshGenerator : MonoBehaviour {
     ComputeBuffer triCountBuffer;
 
     bool settingsUpdated;
+    [Header("Performance")]
+    [Tooltip("If there are chunks to load, this will be the maximum fps.")]
     public float fpsBreakout = 60f;
+    [Tooltip("Smaller chunks load faster when in blocking mode. Larger chunks work better in non-blocking mode, but can be limited by the collider update routine if colliders are needed.")]
+    public bool blockingGpu = true;
+    [Tooltip("Asynchronous garbage collection and PCG can cause lag spikes if not set right, so we call it in our timer every once in a while.")]
+    public int collect_countdown = 10;
 
     void Awake () {
         if (Application.isPlaying && !fixedMapSize) {
-            InitVariableChunkStructures ();
+
+            InitVariableChunkStructures();
 
             var oldChunks = FindObjectsOfType<Chunk> ();
             for (int i = oldChunks.Length - 1; i >= 0; i--) {
@@ -104,20 +113,20 @@ public class MeshGenerator : MonoBehaviour {
     }
 
     void InitVariableChunkStructures () {
-        recycleableChunks = new Queue<Chunk> ();
-        chunks = new List<Chunk> ();
-        existingChunks = new Dictionary<Vector3Int, Chunk> ();
+        recycleableChunks = new Queue<Chunk> (10192);
+        chunks = new List<Chunk> (10192);
+        existingChunks = new Dictionary<Vector3Int, Chunk> (10192);
     }
 
+
     
+
 
     void InitVisibleChunks () {
         if (chunks==null) {
             return;
         }
         CreateChunkHolder ();
-
-        
 
         Vector3 p = viewer.position;
         Vector3 ps = p / boundsSize;
@@ -127,12 +136,24 @@ public class MeshGenerator : MonoBehaviour {
         float sqrViewDistance = viewDistance * viewDistance;
 
         // Go through all existing chunks and flag for recyling if outside of max view dst
+        float t0 = Time.realtimeSinceStartup;
+
+        Chunk chunk;
+        Vector3 centre;
+        Vector3 viewerOffset;
+        Vector3 o;
+        float sqrDst;
         for (int i = chunks.Count - 1; i >= 0; i--) {
-            Chunk chunk = chunks[i];
-            Vector3 centre = CentreFromCoord (chunk.coord);
-            Vector3 viewerOffset = p - centre;
-            Vector3 o = new Vector3 (Mathf.Abs (viewerOffset.x), Mathf.Abs (viewerOffset.y), Mathf.Abs (viewerOffset.z)) - Vector3.one * boundsSize / 2;
-            float sqrDst = new Vector3 (Mathf.Max (o.x, 0), Mathf.Max (o.y, 0), Mathf.Max (o.z, 0)).sqrMagnitude;
+            if (Time.realtimeSinceStartup - t0 > (1.0 / fpsBreakout))
+            {
+                return;
+            }
+
+            chunk = chunks[i];
+            centre = CentreFromCoord (chunk.coord);
+            viewerOffset = p - centre;
+            o = new Vector3 (Mathf.Abs (viewerOffset.x), Mathf.Abs (viewerOffset.y), Mathf.Abs (viewerOffset.z)) - Vector3.one * boundsSize / 2;
+            sqrDst = new Vector3 (Mathf.Max (o.x, 0), Mathf.Max (o.y, 0), Mathf.Max (o.z, 0)).sqrMagnitude;
             if (sqrDst > sqrViewDistance) {
                 existingChunks.Remove (chunk.coord);
                 recycleableChunks.Enqueue (chunk);
@@ -140,8 +161,14 @@ public class MeshGenerator : MonoBehaviour {
             }
         }
 
-        float t0 = Time.realtimeSinceStartup;
+        collect_countdown -= 1;
+        if (collect_countdown == 0)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false);
+            collect_countdown = 10;
+        }
 
+        Vector3Int coord;
         foreach (Vector3Int spi in SpiralIterators.Cube(new Vector3Int(maxChunksInView, maxChunksInView, maxChunksInView)))
         {
             if (Time.realtimeSinceStartup - t0 > (1.0 / fpsBreakout))
@@ -149,17 +176,28 @@ public class MeshGenerator : MonoBehaviour {
                 return;
             }
 
-            Vector3Int coord = spi + viewerCoord;
+            coord = spi + viewerCoord;
 
             if (existingChunks.ContainsKey(coord))
             {
-                continue;
+                
+                if(!blockingGpu && (((!existingChunks[coord].asyncOp0?.done) ?? true) ||
+                    ((!existingChunks[coord].asyncOp1?.done) ?? true) ||
+                    ((!existingChunks[coord].asyncOp2?.done) ?? true)))
+                {
+                    // wait for centermost chunks to finish
+                    return;
+                }
+                else
+                {
+                    continue;
+                }
             }
 
-            Vector3 centre = CentreFromCoord(coord);
-            Vector3 viewerOffset = p - centre;
-            Vector3 o = new Vector3(Mathf.Abs(viewerOffset.x), Mathf.Abs(viewerOffset.y), Mathf.Abs(viewerOffset.z)) - Vector3.one * boundsSize / 2;
-            float sqrDst = new Vector3(Mathf.Max(o.x, 0), Mathf.Max(o.y, 0), Mathf.Max(o.z, 0)).sqrMagnitude;
+            centre = CentreFromCoord(coord);
+            viewerOffset = p - centre;
+            o = new Vector3(Mathf.Abs(viewerOffset.x), Mathf.Abs(viewerOffset.y), Mathf.Abs(viewerOffset.z)) - Vector3.one * boundsSize / 2;
+            sqrDst = new Vector3(Mathf.Max(o.x, 0), Mathf.Max(o.y, 0), Mathf.Max(o.z, 0)).sqrMagnitude;
 
             // Chunk is within view distance and should be created (if it doesn't already exist)
             if (sqrDst <= sqrViewDistance)
@@ -170,20 +208,20 @@ public class MeshGenerator : MonoBehaviour {
                 {
                     if (recycleableChunks.Count > 0)
                     {
-                        Chunk chunk = recycleableChunks.Dequeue();
+                        chunk = recycleableChunks.Dequeue();
                         chunk.coord = coord;
                         existingChunks.Add(coord, chunk);
                         chunks.Add(chunk);
-                        UpdateChunkMesh(chunk);
+                        UpdateChunkMesh(chunk, blockingGpu);
                     }
                     else
                     {
-                        Chunk chunk = CreateChunk(coord);
+                        chunk = CreateChunk(coord);
                         chunk.coord = coord;
                         chunk.SetUp(mat, generateColliders);
                         existingChunks.Add(coord, chunk);
                         chunks.Add(chunk);
-                        UpdateChunkMesh(chunk);
+                        UpdateChunkMesh(chunk, blockingGpu);
                     }
                 }
             }
@@ -196,10 +234,17 @@ public class MeshGenerator : MonoBehaviour {
         return GeometryUtility.TestPlanesAABB (planes, bounds);
     }
 
-    public void UpdateChunkMesh (Chunk chunk) {
+    int maxTris=-1;
+    Triangle[] tris;
+    Vector3[] vertices;
+    int[] meshTriangles;
+
+    public void UpdateChunkMesh (Chunk chunk, bool? blocking=null) {
         int numVoxelsPerAxis = numPointsPerAxis - 1;
         int numThreadsPerAxis = Mathf.CeilToInt (numVoxelsPerAxis / (float) threadGroupSize);
         float pointSpacing = boundsSize / (numPointsPerAxis - 1);
+
+        bool blockGpu = blocking?? blockingGpu;
 
         Vector3Int coord = chunk.coord;
         Vector3 centre = CentreFromCoord (coord);
@@ -208,45 +253,87 @@ public class MeshGenerator : MonoBehaviour {
 
         densityGenerator.Generate (pointsBuffer, numPointsPerAxis, boundsSize, worldBounds, centre, offset, pointSpacing);
 
-        triangleBuffer.SetCounterValue (0);
-        shader.SetBuffer (0, "points", pointsBuffer);
-        shader.SetBuffer (0, "triangles", triangleBuffer);
-        shader.SetInt ("numPointsPerAxis", numPointsPerAxis);
-        shader.SetFloat ("isoLevel", isoLevel);
+        void SetupShader()
+        {
+            triangleBuffer.SetCounterValue(0);
+            shader.SetBuffer(0, "points", pointsBuffer);
+            shader.SetBuffer(0, "triangles", triangleBuffer);
+            shader.SetInt("numPointsPerAxis", numPointsPerAxis);
+            shader.SetFloat("isoLevel", isoLevel);
 
-        shader.Dispatch (0, numThreadsPerAxis, numThreadsPerAxis, numThreadsPerAxis);
-
-        // Get number of triangles in the triangle buffer
-        ComputeBuffer.CopyCount (triangleBuffer, triCountBuffer, 0);
-        int[] triCountArray = { 0 };
-        triCountBuffer.GetData (triCountArray);
-        int numTris = triCountArray[0];
-
-        // Get triangle data from shader
-        Triangle[] tris = new Triangle[numTris];
-        triangleBuffer.GetData (tris, 0, 0, numTris);
-
-        Mesh mesh = chunk.mesh;
-        mesh.Clear ();
-
-        var vertices = new Vector3[numTris * 3];
-        var meshTriangles = new int[numTris * 3];
-
-        for (int i = 0; i < numTris; i++) {
-            for (int j = 0; j < 3; j++) {
-                meshTriangles[i * 3 + j] = i * 3 + j;
-                vertices[i * 3 + j] = tris[i][j];
-            }
+            shader.Dispatch(0, numThreadsPerAxis, numThreadsPerAxis, numThreadsPerAxis);
         }
-        mesh.vertices = vertices;
-        mesh.triangles = meshTriangles;
-        var scale = chunk.GetComponent<Transform>().localScale;
-        mesh.SetUVs(0, UvCalculator.CalculateUVs(vertices, scale.magnitude));
-        NormalSolver.RecalculateNormals(mesh, normalDegrees);
 
-        chunk.UpdateColliders();
+        ComputeBuffer.CopyCount(triangleBuffer, triCountBuffer, 0);
 
+        void HandleReadBack()
+        {
+            int[] triCountArray = { 0 };
+            triCountBuffer.GetData(triCountArray);
+
+            int numTris = triCountArray[0];
+
+            if (numTris > maxTris || tris==null || vertices==null || meshTriangles==null)
+            {
+                maxTris = numTris;
+                tris = new Triangle[numTris];
+                vertices = new Vector3[numTris * 3];
+                meshTriangles = new int[numTris * 3];
+            }
+
+            // Get triangle data from shader
+            triangleBuffer.GetData(tris, 0, 0, numTris);
+
+            Mesh mesh = chunk.mesh;
+            mesh.Clear();
+
+            for (int i = 0; i < numTris; i++)
+            {
+                for (int j = 0; j < 3; j++)
+                {
+                    meshTriangles[i * 3 + j] = i * 3 + j;
+                    vertices[i * 3 + j] = tris[i][j];
+                }
+            }
+            mesh.vertices = vertices;
+            mesh.triangles = meshTriangles;
+            var scale = chunk.GetComponent<Transform>().localScale;
+            mesh.SetUVs(0, UvCalculator.CalculateUVs(vertices, scale.magnitude));
+            NormalSolver.RecalculateNormals(mesh, normalDegrees);
+
+            chunk.UpdateColliders();
+        }
+
+        if (!blockGpu)
+        {
+            chunk.asyncOp0 = null;
+            chunk.asyncOp1 = null;
+            chunk.asyncOp2 = null;
+            var async0 = AsyncGPUReadback.Request(pointsBuffer, delegate (AsyncGPUReadbackRequest a0)
+            {
+                SetupShader();
+                var async1 = AsyncGPUReadback.Request(triangleBuffer, delegate (AsyncGPUReadbackRequest a1)
+                {
+                // Get number of triangles in the triangle buffer
+                ComputeBuffer.CopyCount(triangleBuffer, triCountBuffer, 0);
+                    var async2 = AsyncGPUReadback.Request(triCountBuffer, delegate (AsyncGPUReadbackRequest a2)
+                    {
+                        HandleReadBack();
+                    });
+                    chunk.asyncOp2 = async2;
+                });
+                chunk.asyncOp1 = async1;
+            });
+            chunk.asyncOp0 = async0;
+        }
+        else
+        {
+            SetupShader();
+            ComputeBuffer.CopyCount(triangleBuffer, triCountBuffer, 0);
+            HandleReadBack();
+        }
         
+
     }
 
     public void UpdateAllChunks () {

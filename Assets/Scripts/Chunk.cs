@@ -1,6 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 public class Chunk : MonoBehaviour {
     public Vector3Int coord;
@@ -12,6 +13,16 @@ public class Chunk : MonoBehaviour {
     MeshRenderer meshRenderer;
     MeshCollider meshCollider;
     bool generateCollider;
+
+    [HideInInspector]
+    public AsyncGPUReadbackRequest? asyncOp0;
+    [HideInInspector]
+    public AsyncGPUReadbackRequest? asyncOp1;
+    [HideInInspector]
+    public AsyncGPUReadbackRequest? asyncOp2;
+    [HideInInspector]
+    public AsyncGPUReadbackRequest? asyncOp3;
+
 
     public void DestroyOrDisable () {
         if (Application.isPlaying) {
@@ -26,8 +37,6 @@ public class Chunk : MonoBehaviour {
     {
         if (generateCollider)
         {
-            meshCollider.sharedMesh = null;
-            meshCollider.sharedMesh = mesh;
             // force update
             meshCollider.enabled = false;
             meshCollider.enabled = true;
@@ -53,6 +62,7 @@ public class Chunk : MonoBehaviour {
 
         if (meshCollider == null && generateCollider) {
             meshCollider = gameObject.AddComponent<MeshCollider> ();
+            meshCollider.cookingOptions = MeshColliderCookingOptions.None;
         }
         if (meshCollider != null && !generateCollider) {
             DestroyImmediate (meshCollider);
@@ -70,8 +80,8 @@ public class Chunk : MonoBehaviour {
                 meshCollider.sharedMesh = mesh;
             }
             // force update
-            meshCollider.enabled = false;
-            meshCollider.enabled = true;
+            //meshCollider.enabled = false;
+            //meshCollider.enabled = true;
         }
 
         
